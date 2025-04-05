@@ -6,7 +6,9 @@ import dobby.exceptions.MalformedJsonException;
 import dobby.util.json.NewJson;
 import common.logger.Logger;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -19,7 +21,7 @@ public class Request {
     private final Map<String, File> files = new HashMap<>();
     private RequestTypes type;
     private String path;
-    private byte[] rawBody;
+    private String rawBody;
     private NewJson body;
     private Map<String, String> headers;
     private Map<String, List<String>> query;
@@ -30,7 +32,7 @@ public class Request {
      * @param in The input stream to parse the request from
      * @return The parsed request
      */
-    public static Request parse(InputStream in) throws MalformedJsonException {
+    public static Request parse(BufferedReader in) throws MalformedJsonException {
         final Request req = new Request();
 
         final List<String> lines = consumeInputStream(in);
@@ -55,12 +57,12 @@ public class Request {
         }
 
         if (req.getType() == RequestTypes.POST || req.getType() == RequestTypes.PUT) {
+            req.setRawBody(extractBody(in, contentLength));
+
             final String contentTypeHeader = req.getHeader("Content-Type");
             if (contentTypeHeader != null && contentTypeHeader.contains("application/json")) {
-                req.setRawBody(extractBodyLines(in, contentLength));
                 req.setBody(NewJson.parse(req.getRawBody()));
             } else if (contentTypeHeader != null && contentTypeHeader.contains("multipart/form-data")) {
-                req.setRawBody(extractBodyBytes(in, contentLength));
                 parseMultipartForm(req);
             }
         }
@@ -92,14 +94,13 @@ public class Request {
         return queryMap;
     }
 
-    private static String extractBodyLines(InputStream in, int length) {
+    private static String extractBody(BufferedReader in, int length) {
         StringBuilder body = new StringBuilder();
-        final BufferedReader input = new BufferedReader(new InputStreamReader(in));
         int bytesRead = 0;
         while (true) {
             try {
-                if (!input.ready() || bytesRead >= length) break;
-                body.append((char) input.read());
+                if (!in.ready() || bytesRead >= length) break;
+                body.append((char) in.read());
                 bytesRead++;
             } catch (IOException e) {
                 throw new RuntimeException(e);
@@ -108,126 +109,77 @@ public class Request {
         return body.toString();
     }
 
-    private static byte[] extractBodyBytes(InputStream in, int length) {
-        final byte[] body = new byte[length];
-        int bytesRead = 0;
-        while (true) {
-            try {
-                if (bytesRead >= length) break;
-                int read = in.read(body, bytesRead, length - bytesRead);
-                if (read == -1) break;
-                bytesRead += read;
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        }
-        return body;
-    }
-
     private static void parseMultipartForm(Request req) {
+        // todo handle malformed multipart form data
         final String boundary = req.getHeader("Content-Type").split("boundary=")[1].split(";")[0];
-        final byte[] body = req.getRawBodyBytes();
-        final byte[] boundaryBytes = ("--" + boundary).getBytes();
-        final byte[] endBoundaryBytes = ("--" + boundary + "--").getBytes();
+        final String[] parts = req.getRawBody().split("--" + boundary);
 
-        int pos = 0;
+        for (String part : parts) {
+            part = part.trim();
+            if (part.isEmpty() || part.equals("--")) continue;
 
-        while (pos < body.length) {
-            int start = indexOf(body, boundaryBytes, pos);
-            if (start == -1) break;
-            start += boundaryBytes.length;
+            final String[] sections = part.split("\\r?\\n\\r?\\n", 2); // split headers from body
+            if (sections.length < 2) continue;
 
-            if (body[start] == '\r' && body[start + 1] == '\n') {
-                start += 2;
-            }
+            final String headersSection = sections[0];
+            final String bodySection = sections[1].trim();
+            final String[] headers = headersSection.split("\\r?\\n");
+            if (headers.length < 1) continue;
 
-            int headerEnd = indexOf(body, "\r\n\r\n".getBytes(), start);
-            if (headerEnd == -1) break;
+            final String contentDisposition = headers[0];
+            if (!contentDisposition.startsWith("Content-Disposition: form-data;")) continue;
 
-            String headers = new String(body, start, headerEnd - start);
-            int contentStart = headerEnd + 4;
-
-            int nextBoundary = indexOf(body, boundaryBytes, contentStart);
-            if (nextBoundary == -1) {
-                nextBoundary = indexOf(body, endBoundaryBytes, contentStart);
-                if (nextBoundary == -1) nextBoundary = body.length;
-            }
-
-            byte[] content = Arrays.copyOfRange(body, contentStart, nextBoundary - 2); // -2 to trim last \r\n
-
-            String name = null;
+            final String name = contentDisposition.split("name=\"")[1].split("\"")[0];
             String filename = null;
-            for (String line : headers.split("\r\n")) {
-                if (line.toLowerCase().startsWith("content-disposition")) {
-                    name = extractField(line, "name");
-                    filename = extractField(line, "filename");
-                }
+            if (contentDisposition.contains("filename=\"")) {
+                filename = contentDisposition.split("filename=\"")[1].split("\"")[0];
             }
 
-            if (name == null) continue;
+            if (!name.equals("file") || filename == null) continue;
 
-            if (filename != null) {
-                final File tmpFile = saveFile(content);
-                if (tmpFile != null) {
-                    req.addFile(name, tmpFile);
-                    LOGGER.debug("File uploaded: " + filename + " -> " + tmpFile.getAbsolutePath());
-                } else {
-                    LOGGER.error("Failed to save file: " + filename);
-                }
-            } else {
-                final String value = new String(content);
-                LOGGER.debug("Form field: " + name + " = " + value);
-            }
+            final String contentType = headers[1];
+            if (!contentType.startsWith("Content-Type: ")) continue;
+            final String type = contentType.split("Content-Type: ")[1].trim();
+            if (type.isEmpty()) continue;
 
-            pos = nextBoundary;
-        }
-    }
+            byte[] md5Hash = null;
 
-    private static int indexOf(byte[] haystack, byte[] needle, int start) {
-        outer:
-        for (int i = start; i <= haystack.length - needle.length; i++) {
-            for (int j = 0; j < needle.length; j++) {
-                if (haystack[i + j] != needle[j]) continue outer;
-            }
-            return i;
-        }
-        return -1;
-    }
-
-    private static String extractField(String contentDisposition, String fieldName) {
-        final String pattern = fieldName + "=\"";
-        int start = contentDisposition.indexOf(pattern);
-        if (start == -1) return null;
-        start += pattern.length();
-        final int end = contentDisposition.indexOf("\"", start);
-        if (end == -1) return null;
-        return contentDisposition.substring(start, end);
-    }
-
-    @SuppressWarnings("ResultOfMethodCallIgnored")
-    private static File saveFile(byte[] data) {
-        final String tmpFileName = UUID.randomUUID().toString();
-
-        final File file = new File(Config.getInstance().getString("dobby.tmpUploadDir", "/tmp") + "/" + tmpFileName);
-        if (!file.exists()) {
             try {
-                file.createNewFile();
-            } catch (IOException e) {
-                LOGGER.error("Failed to create file: " + file.getAbsolutePath());
+                md5Hash = MessageDigest.getInstance("MD5").digest(bodySection.getBytes());
+            } catch (NoSuchAlgorithmException e) {
+                LOGGER.error("MD5 algorithm not found");
                 LOGGER.trace(e);
-                return null;
             }
+
+            if (md5Hash == null) continue;
+
+            final StringBuilder sb = new StringBuilder();
+            for (byte b : md5Hash) {
+                sb.append(String.format("%02x", b));
+            }
+            final String hash = sb.toString();
+
+            final File file = new File(Config.getInstance().getString("dobby.tmpUploadDir", "/tmp") + "/" + hash);
+            if (!file.exists()) {
+                try {
+                    file.createNewFile();
+                } catch (IOException e) {
+                    LOGGER.error("Failed to create file: " + file.getAbsolutePath());
+                    LOGGER.trace(e);
+                }
+            }
+
+            try {
+                Files.write(file.toPath(), bodySection.getBytes());
+            } catch (IOException e) {
+                LOGGER.error("Failed to write file: " + file.getAbsolutePath());
+                LOGGER.trace(e);
+            }
+
+            req.addFile(name, file);
         }
 
-        try {
-            Files.write(file.toPath(), data);
-        } catch (IOException e) {
-            LOGGER.error("Failed to write file: " + file.getAbsolutePath());
-            LOGGER.trace(e);
-            return null;
-        }
-
-        return file;
+        req.setRawBody(null);
     }
 
     private static String extractPath(String line) {
@@ -238,26 +190,12 @@ public class Request {
         return "";
     }
 
-    private static ArrayList<String> consumeInputStream(InputStream in) {
+    private static ArrayList<String> consumeInputStream(BufferedReader input) {
         final ArrayList<String> lines = new ArrayList<>();
-        StringBuilder lineBuffer = new StringBuilder();
+        String line;
         try {
-            while (true) {
-                final int read = in.read();
-                if (read == -1) break;
-                final char c = (char) read;
-                if (c == '\n') {
-                    lines.add(lineBuffer.toString());
-                    if (lineBuffer.length() == 0) {
-                        break;
-                    }
-                    lineBuffer = new StringBuilder();
-                } else if (c != '\r') {
-                    lineBuffer.append(c);
-                }
-            }
-            if (lineBuffer.length() > 0) {
-                lines.add(lineBuffer.toString());
+            while (!(line = input.readLine()).isEmpty()) {
+                lines.add(line);
             }
             return lines;
         } catch (Exception e) {
@@ -392,19 +330,11 @@ public class Request {
      * @return The body of the request as a string
      */
     public String getRawBody() {
-        return new String(rawBody);
-    }
-
-    public byte[] getRawBodyBytes() {
         return rawBody;
     }
 
-    private void setRawBody(byte[] rawBody) {
-        this.rawBody = rawBody;
-    }
-
     private void setRawBody(String rawBody) {
-        this.rawBody = rawBody.getBytes();
+        this.rawBody = rawBody;
     }
 
     /**
