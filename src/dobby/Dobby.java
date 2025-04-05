@@ -33,7 +33,7 @@ import java.util.concurrent.TimeUnit;
  * The Server class is used to start the server
  */
 public class Dobby {
-    private static final String version = "2.0";
+    private static final String version = "2.1";
     private static Class<?> applicationClass;
     private static final Logger LOGGER = new Logger(Dobby.class);
     private final Date startTime;
@@ -278,7 +278,14 @@ public class Dobby {
         } catch(Exception e) {
             LOGGER.trace(e);
             res.setCode(ResponseCodes.INTERNAL_SERVER_ERROR);
-            res.setBody("Internal Server Error");
+
+            final StringBuilder sb = new StringBuilder();
+
+            for (StackTraceElement ste : e.getStackTrace()) {
+                sb.append(ste.toString()).append("\n");
+            }
+            res.setBody(sb.toString());
+
             res.send();
         }
     }
