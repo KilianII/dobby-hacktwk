@@ -125,7 +125,6 @@ public class Request {
     }
 
     private static void parseMultipartForm(Request req) {
-        req.setBody(new NewJson());
         final String boundary = req.getHeader("Content-Type").split("boundary=")[1].split(";")[0];
         final byte[] body = req.getRawBodyBytes();
         final byte[] boundaryBytes = ("--" + boundary).getBytes();
@@ -177,7 +176,7 @@ public class Request {
                 }
             } else {
                 final String value = new String(content);
-                req.getBody().setString(name, value);
+                LOGGER.debug("Form field: " + name + " = " + value);
             }
 
             pos = nextBoundary;
