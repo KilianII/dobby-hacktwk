@@ -6,8 +6,7 @@ public enum FilterOrder {
     SESSION_PRE_FILTER(1),
     // post filters
     SESSION_POST_FILTER(0),
-    COOKIE_POST_FILTER(1),
-    REMOVE_TEMPORARY_FILES_POST_FILTER(2);
+    COOKIE_POST_FILTER(1);
 
     private final int order;
 
