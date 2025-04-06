@@ -18,9 +18,7 @@ import dobby.task.SchedulerService;
 import common.logger.LogLevel;
 import common.logger.Logger;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
+import java.io.*;
 import java.lang.reflect.InvocationTargetException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -279,12 +277,13 @@ public class Dobby {
             LOGGER.trace(e);
             res.setCode(ResponseCodes.INTERNAL_SERVER_ERROR);
 
-            final StringBuilder sb = new StringBuilder();
+            final StringWriter writer = new StringWriter();
+            final PrintWriter printWriter = new PrintWriter(writer);
+            e.printStackTrace(printWriter);
+            printWriter.flush();
 
-            for (StackTraceElement ste : e.getStackTrace()) {
-                sb.append(ste.toString()).append("\n");
-            }
-            res.setBody(sb.toString());
+            final String stackTrace = writer.toString();
+            res.setBody("500 - Internal Server Error\n" + stackTrace);
 
             res.send();
         }
